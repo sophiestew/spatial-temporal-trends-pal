@@ -1,0 +1,1755 @@
+---
+title: "S.Stewart ESYS"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+chunk_output_type: console
+code_folding: hide
+toc: true
+toc_depth: 3
+---
+
+# #### Options, packages and data  #####
+
+Global options
+```{r Global_options}
+knitr::opts_chunk$set(echo = FALSE, include=FALSE,message=FALSE, warning=FALSE, results="hide",include=FALSE)
+options("scipen"=100, digits=4)
+
+```
+
+Add data and packages
+```{r Add data and packages, message=FALSE,include=F}
+library("ggplot2")  #package for plotting stacked bar charts, dendrogram, nmds
+library('RColorBrewer') #package for plotting
+library(patchwork) #package for multipanel plots
+library(Polychrome) # for making color pallates with createpalette() .. makes new random palettes of distinct colors 
+library(reshape2) # for data management stuff like wide-long
+library(knitr) # for ??
+library(raster) # for the cv function .. why not in base?!?!
+library(plyr) # turn turn an array into a list .. 
+library(gtools) # for the combinations() function used to get all pairwise combinations of focal taxa
+library(wesanderson) #package for plotting
+library(tidyverse) # package for data management (nmds, clustering plots)
+library(ggdendro) # for the hierachical clustering plot
+library(vegan) # for the NMDS
+library(dplyr)
+library(tidyr)
+library('stats4')
+library('viridis')
+## For pocillo code
+library("tools") # for "file_path_sans_ext()"
+library('multcompView')
+library('lmtest')
+library(multcomp) # for tukey post hoc on logisitic regression
+
+
+files <- list.files(
+"C:/CoralData",
+pattern="\\.csv$",
+full.names=TRUE
+)
+
+data_list <- lapply(files, read.csv)
+
+poc_vpi <- dplyr::bind_rows(data_list)
+
+
+#write.csv(raw.combined,"test.csv",row.names = F)
+
+pastey <- function(x,row.names=FALSE,col.names=TRUE,...) {
+  write.table(x,file = paste0("clipboard-", object.size(x)),sep="\t",row.names=row.names,col.names=col.names,...)
+}
+copey <- function(header=TRUE,...) {
+  read.table("clipboard",sep="\t",header=header,...)
+}
+ 
+#temp_dat=copey()
+```
+
+# Data Preparation
+Data are exported as .csv from TL from each site by transition (e.g. y1-y2, y2-y3 ...), combine into a single data frame 
+
+```{r 1- Raw data compilation}
+
+setwd("C:/CoralData")
+
+TL.files <- list.files(
+  path = "C:/CoralData",
+  pattern = "\\.csv$",  # only csv
+  full.names = TRUE      # full path
+)
+
+# extract metadata from the file names
+file.meta=do.call("rbind",strsplit(file_path_sans_ext(TL.files),"_"))
+
+
+# read in the files and append the metadata. the index numbers below will have to change depending on the structure of the file names
+raw.data=list(1)
+for (i in 1:length(TL.files)) {
+  raw.data[i]=list(read.table(TL.files[i], header = T, sep = ","))
+  raw.data[[i]]$Island=rep(file.meta[i,2],nrow(raw.data[[i]]))
+  raw.data[[i]]$Site=rep(file.meta[i,3],nrow(raw.data[[i]]))
+  raw.data[[i]]$transition=rep(file.meta[i,4],nrow(raw.data[[i]]))
+}
+names(raw.data)=file_path_sans_ext(TL.files)
+raw.combined=data.frame(do.call("rbind",raw.data))
+
+```
+
+Due to the structure of the data resulting from FnF, colonies are repeated on rows, which creates some issues. The solution is to separate data into each transition,  pull out the unique entries for each ramet (eg unique blob in a given year) each year, sum genet for each year, then merge genets across years.  
+
+Repeated rows explanation: a colony that fuses will have two IDs in the first year of a transition, and one ID in the second year of a transition. Colonies that split will have one ID in the first year and two IDs in the second year. Explore one of the transition.split[[1]], filter to just split and fuse in action2 to get an idea of what is going on (I think that transition split is now blobs[[]])
+
+library(dplyr)
+
+LR_data <- LR_data %>%
+mutate(
+fate = case_when(
+year1_size == 0 & year2_size > 0 ~ "Recruitment",
+year2_size == 0 | is.na(year2_size) ~ "Dead",
+(year2_size - year1_size) / year1_size > 0.05 ~ "Growth",
+(year2_size - year1_size) / year1_size < -0.05 ~ "Shrinkage",
+TRUE ~ "Stasis" 
+)
+) %>%
+filter(fate != "Recruitment") %>%
+mutate(
+fate_code = if_else(fate %in% c("Growth", "Shrinkage", "Stasis"), 1, 0)
+)
+
+
+
+```{r 2- Genet level summaries}
+
+raw.combined$RID_ini=paste(raw.combined$Site,raw.combined$Genet,raw.combined$Blob1,sep="_")
+raw.combined$RID_fin=paste(raw.combined$Site,raw.combined$Genet,raw.combined$Blob2,sep="_")
+raw.combined$SiteGenID=paste(raw.combined$Site,raw.combined$Genet,sep="_")
+raw.combined$SiteGenClassID=paste(raw.combined$Site,raw.combined$Genet,raw.combined$Class,sep="_")
+
+specs=c("Porites_massive","Pocillopora","Hydnophora_microconos","Astrea_curta")    
+poc.raw<-raw.combined[raw.combined$Class %in% specs==T,]
+rownames(poc.raw)=NULL
+
+
+transitions=c("t1","t2","t3","t4","t5","t6")
+trans_years=unique(poc.raw$transition)
+yearz=2013:2019
+
+blobs=list()
+blobs[[1]]=unique(poc.raw[which(poc.raw[,'transition']==trans_years[1]),c("Genet","Class","Blob1","RID_ini","Area1","Site","SiteGenID","SiteGenClassID")])
+
+for (i in 1:length(trans_years)){
+blobs[[i+1]]=unique(poc.raw[which(poc.raw[,'transition']==trans_years[i]),c("Genet","Class","Blob2","RID_fin","Area2","Site","SiteGenID","SiteGenClassID")])
+}
+names(blobs)=yearz
+
+for (i in 1:length(blobs)){
+names(blobs[[i]])=c(
+  paste(yearz[i],"GenID",sep="_"),
+  paste(yearz[i],"Class",sep="_"),
+  paste(yearz[i],"RID",sep="_"),
+  paste(yearz[i],"SiteGenRID",sep="_"),
+  paste(yearz[i],"size",sep="_"),
+  paste(yearz[i],"site",sep="_"),
+  paste(yearz[i],"SiteGenID",sep="_"),
+  paste(yearz[i],"SiteGenClassID",sep="_"))
+    }
+
+genetsums=list()
+for (i in 1:length(blobs)){
+genetsums[[i]]=aggregate(blobs[[i]][,5],by=list(blobs[[i]][,8],blobs[[i]][,1],blobs[[i]][,6],blobs[[i]][,2]),sum)
+}
+
+yearz <- 2013:2019
+for (i in 1:length(genetsums)) {
+  names(genetsums[[i]]) <- c(
+    paste(yearz[i], "GenSiteClassID", sep="_"),
+    paste(yearz[i], "GenID", sep="_"),
+    paste(yearz[i], "Site", sep="_"),
+    paste(yearz[i], "Class", sep="_"),
+    paste("size", yearz[i], sep="_")
+  )
+}
+
+merge1=merge(genetsums[[1]],genetsums[[2]],by.x="2013_GenSiteClassID",by.y="2014_GenSiteClassID",all=T)
+merge2=merge(merge1,genetsums[[3]],by.x="2013_GenSiteClassID",by.y="2015_GenSiteClassID",all=T)
+merge3=merge(merge2,genetsums[[4]],by.x="2013_GenSiteClassID",by.y="2016_GenSiteClassID",all=T)
+merge4=merge(merge3,genetsums[[5]],by.x="2013_GenSiteClassID",by.y="2017_GenSiteClassID",all=T)
+merge5=merge(merge4,genetsums[[6]],by.x="2013_GenSiteClassID",by.y="2018_GenSiteClassID",all=T)
+final_merge_raw=merge(merge5,genetsums[[7]],by.x="2013_GenSiteClassID",by.y="2019_GenSiteClassID",all=T)
+
+final_merge_raw$Class <- apply(final_merge_raw[, grep("_Class$", names(final_merge_raw))], 1, function(row) {
+  first_non_na <- row[!is.na(row) & row != 0]
+  if (length(first_non_na) > 0) first_non_na[1] else NA
+})
+
+final_merge_raw[is.na(final_merge_raw)] <- 0
+
+size_columns <- grep("size_", names(final_merge_raw), value = TRUE)
+final_merge_raw2 <- final_merge_raw[-which(rowSums(final_merge_raw[, size_columns]) == 0), ]
+
+merge_meta=data.frame(do.call("rbind",strsplit(final_merge_raw2$'2013_GenSiteClassID',"_")))
+
+final_merge=data.frame(site=merge_meta[,1],final_merge_raw2[,c('Class','2013_GenSiteClassID','2013_GenID','size_2013','size_2014','size_2015','size_2016','size_2017','size_2018','size_2019')])
+
+names(final_merge)[1:4]=c("Site","Class","GenSiteClassID","GenID")
+
+
+final_merge$Fate_2013<-ifelse(final_merge$size_2013>0 & final_merge$size_2014 == 0,"died","alive")
+
+final_merge$Fate_2014<-ifelse(final_merge$size_2014>0 & final_merge$size_2015 == 0,"died","alive")
+final_merge$Fate_2014<-ifelse(final_merge$Fate_2013=="died" | final_merge$Fate_2013=="AD","AD",final_merge$Fate_2014)
+#final_merge$Fate_2014<-ifelse(final_merge$size_2014>0 & final_merge$size_2015 == 0,"died",final_merge$Fate_2014)
+
+final_merge$Fate_2015<-ifelse(final_merge$size_2015>0 & final_merge$size_2016 == 0,"died","alive")
+final_merge$Fate_2015<-ifelse(final_merge$Fate_2014=="AD"| final_merge$Fate_2014=="AD","AD",final_merge$Fate_2015)
+final_merge$Fate_2015<-ifelse(final_merge$Fate_2014=="died"| final_merge$Fate_2014=="AD","AD",final_merge$Fate_2015)
+
+final_merge$Fate_2016<-ifelse(final_merge$size_2016>0 & final_merge$size_2017 == 0,"died","alive")
+final_merge$Fate_2016<-ifelse(final_merge$Fate_2015=="AD"| final_merge$Fate_2015=="AD","AD",final_merge$Fate_2016)
+final_merge$Fate_2016<-ifelse(final_merge$Fate_2015=="died"| final_merge$Fate_2015=="AD","AD",final_merge$Fate_2016)
+
+final_merge$Fate_2017<-ifelse(final_merge$size_2017>0 & final_merge$size_2018 == 0,"died","alive")
+final_merge$Fate_2017<-ifelse(final_merge$Fate_2016=="AD"| final_merge$Fate_2016=="AD","AD",final_merge$Fate_2017)
+final_merge$Fate_2017<-ifelse(final_merge$Fate_2016=="died"| final_merge$Fate_2016=="AD","AD",final_merge$Fate_2017)
+
+final_merge$Fate_2018<-ifelse(final_merge$size_2018>0 & final_merge$size_2019 == 0,"died","alive")
+final_merge$Fate_2018<-ifelse(final_merge$Fate_2017=="AD" | final_merge$Fate_2017=="AD","AD",final_merge$Fate_2018)
+final_merge$Fate_2018<-ifelse(final_merge$Fate_2017=="died"| final_merge$Fate_2017=="AD","AD",final_merge$Fate_2018)
+
+
+#2018-2019
+final_merge$Fate_2018<-ifelse(final_merge$size_2018==0 & final_merge$size_2019 > 0,"recruit",final_merge$Fate_2018)
+
+#2017-2018
+final_merge$Fate_2017<-ifelse(final_merge$size_2017==0 & final_merge$size_2018 > 0,"recruit",final_merge$Fate_2017)
+final_merge$Fate_2017<-ifelse(final_merge$Fate_2018 == "recruit" | final_merge$Fate_2018 == "BC","BC",final_merge$Fate_2017)
+
+#2016-2017
+final_merge$Fate_2016<-ifelse(final_merge$size_2016==0 & final_merge$size_2017 > 0,"recruit",final_merge$Fate_2016)
+final_merge$Fate_2016<-ifelse(final_merge$Fate_2017 == "recruit" | final_merge$Fate_2017 == "BC","BC",final_merge$Fate_2016)
+
+#2015-2016
+final_merge$Fate_2015<-ifelse(final_merge$size_2015==0 & final_merge$size_2016 > 0,"recruit",final_merge$Fate_2015)
+final_merge$Fate_2015<-ifelse(final_merge$Fate_2016 == "recruit" | final_merge$Fate_2016 == "BC","BC",final_merge$Fate_2015)
+
+
+#2014-2015
+final_merge$Fate_2014<-ifelse(final_merge$size_2014==0 & final_merge$size_2015 > 0,"recruit",final_merge$Fate_2014)
+final_merge$Fate_2014<-ifelse(final_merge$Fate_2015 == "recruit" | final_merge$Fate_2015 == "BC","BC",final_merge$Fate_2014)
+
+#2013-2014
+final_merge$Fate_2013<-ifelse(final_merge$size_2013==0 & final_merge$size_2014 > 0,"recruit",final_merge$Fate_2013)
+final_merge$Fate_2013<-ifelse(final_merge$Fate_2014 == "recruit" | final_merge$Fate_2014 == "BC","BC",final_merge$Fate_2013)
+
+
+final_merge=final_merge[-which(final_merge$GenSiteClassID=="FR40_2251_Astrea_curta"),]
+
+
+
+```
+
+```{r 1- Growth model preparation}
+
+size_long <- final_merge %>%
+  pivot_longer(
+    cols = starts_with("size_"),
+    names_to = "year",
+    values_to = "size"
+  ) %>%
+  mutate(year = as.numeric(sub("size_", "", year)))
+
+size_long_clean <- size_long %>%
+  dplyr::select(-starts_with("Fate_"))
+
+fate_long <- final_merge %>%
+  pivot_longer(
+    cols = starts_with("Fate_"),
+    names_to = "fate_year",
+    values_to = "fate"
+  ) %>%
+  mutate(fate_year = as.numeric(sub("Fate_", "", fate_year)))
+
+fate_long_clean <- fate_long %>%
+  dplyr::select(-starts_with("size_"))
+
+combined_data <- full_join(size_long, fate_long, by = c("Site","Class", "GenSiteClassID", "GenID", "year" = "fate_year"))
+
+final_data <- combined_data %>%
+  group_by(Site, GenSiteClassID, GenID) %>%
+  arrange(year) %>%
+  mutate(
+    next_year_size = lead(size),
+    next_year = lead(year),
+    fate_next_year = lead(fate)
+  ) %>%
+  filter(year < 2019) %>%
+  dplyr::select(Site, GenSiteClassID, GenID, Class,year, next_year, size, next_year_size, fate_next_year)
+
+final_data <- rename(final_data, year1 = year, year2 = next_year, year1_size = size, year2_size = next_year_size, fate = fate_next_year)
+long_sizes=data.frame(final_data)
+
+yearz=2014:2019
+transitions=c("t1","t2","t3","t4","t5","t6")
+long_sizes$transition=NA
+
+for (i in 1:length(yearz)){
+long_sizes[which(long_sizes$year2==yearz[i]),'transition']=transitions[i]
+  }
+
+long_sizes$change <- long_sizes$year2_size - long_sizes$year1_size
+long_sizes$rad1 <- sqrt(long_sizes$year1_size / pi)
+long_sizes$rad2 <- sqrt(long_sizes$year2_size / pi)
+long_sizes$change_rad <- long_sizes$rad2 - long_sizes$rad1
+
+long_grower=long_sizes[which(long_sizes$year2_size>long_sizes$year1_size & long_sizes$year1_size>0 ),]
+
+long_corals=long_sizes[which(long_sizes$year2_size>0 & long_sizes$year1_size>0 ),]
+
+rad_grow_fun <- function(delta, sigma){
+y_pred<- x+(2*sqrt(x*pi)*delta)+pi*delta^2
+  -sum(dnorm(y, mean=y_pred, sd=sigma, log=TRUE)) 
+    #-sum(LL)
+}
+rad_grow_fun2 <- function(alpha, beta, sigma){
+  delta <- alpha + beta * x  # Linear dependency of delta on x
+  y_pred <- x + (2 * sqrt(x * pi) * delta) + pi * delta^2
+  -sum(dnorm(y, mean=y_pred, sd=sigma, log=TRUE))
+}
+
+rad_grow_fun3 <- function(a, b, sigma) {
+  delta <- a /(1+(x*b))
+  y_pred <- x + (2 * sqrt(x * pi) * delta) + pi * delta^2
+  -sum(dnorm(y, mean = y_pred, sd = sigma, log = TRUE))
+}
+
+aer_grow_fun <- function(delta, sigma){
+y_pred<- x+delta
+  -sum(dnorm(y, mean=y_pred, sd=sigma, log=TRUE)) 
+    #-sum(LL)
+}
+
+
+aer_grow_fun2 <- function(alpha, beta, sigma){
+delta<- alpha+beta*x
+  y_pred<- x+delta
+  -sum(dnorm(y, mean=y_pred, sd=sigma, log=TRUE)) 
+    #-sum(LL)
+}
+
+aer_grow_fun3 <- function(a, b, sigma){
+delta<-   a /(1+(x*b))
+y_pred<- x+delta
+-sum(dnorm(y, mean=y_pred, sd=sigma, log=TRUE)) 
+    #-sum(LL)
+}
+
+n_groups_rad_nonline_grow_fun <- function(n_groups) {
+  a_params <- paste0("a", 1:n_groups)
+  param_list <- c("beta", "sigma", a_params)
+  param_str <- paste(param_list, collapse = ", ")
+  
+  function_body <- paste0("
+    a <- list(", paste(a_params, collapse = ", "), ")
+    log_likelihood <- 0
+  
+    for (i in 1:n_groups) {
+      delta <- a[[i]] / (1 + (x_list[[i]] * beta))
+      y_pred <- x_list[[i]] + (2 * sqrt(x_list[[i]] * pi) * delta) + pi * delta^2
+      log_likelihood <- log_likelihood - sum(dnorm(y_list[[i]], mean = y_pred, sd = sigma, log = TRUE))
+    }
+  
+    return(log_likelihood)
+  ")
+  
+  function_def <- paste0("function(", param_str, ") {", function_body, "}")
+  eval(parse(text = function_def))
+}
+
+n_groups_rad_line_grow_fun <- function(n_groups) {
+  a_params <- paste0("a", 1:n_groups)
+  param_list <- c("beta", "sigma", a_params)
+  param_str <- paste(param_list, collapse = ", ")
+  
+  function_body <- paste0("
+    a <- list(", paste(a_params, collapse = ", "), ")
+    log_likelihood <- 0
+  
+    for (i in 1:n_groups) {
+      delta <- a[[i]] + beta * x_list[[i]]  # Linear dependency of delta on x
+      y_pred <- x_list[[i]] + (2 * sqrt(x_list[[i]] * pi) * delta) + pi * delta^2
+      log_likelihood <- log_likelihood - sum(dnorm(y_list[[i]], mean = y_pred, sd = sigma, log = TRUE))
+    }
+  
+    return(log_likelihood)
+  ")
+  
+  function_def <- paste0("function(", param_str, ") {", function_body, "}")
+  eval(parse(text = function_def))
+}
+
+growth_function <- function(area1,delta) {
+  area1 + (2*sqrt(area1*pi)*delta)+pi*delta^2
+}
+
+rad_const_grofun <- function(x,delta){
+y_pred<- x+(2*sqrt(x*pi)*delta)+pi*delta^2
+}
+rad_line_grofun <- function(x,alpha, beta){
+  delta <- alpha + beta * x  
+x + (2 * sqrt(x * pi) * delta) + pi * delta^2
+}
+rad_nonline_grofun <- function(area1,a, b) {
+  delta <- a /(1+(area1*b))
+  area1 + (2 * sqrt(area1 * pi) * delta) + pi * delta^2
+}
+
+aer_const_grofun <- function(x,delta){
+x+delta
+}
+
+aer_line_grofun <- function(x,alpha, beta){
+delta<- alpha+beta*x
+ x+delta
+ }
+
+aer_nonline_grofun <- function(x,a, b, sigma){
+delta<-   a /(1+(x*b))
+x+delta
+}
+
+```
+
+```{r 3- Color palettes}
+
+spec_cols=data.frame(colz=c("#D35FB7","#1AFF1A","#1A85FF","#E66100"),spec=c("Astrea","Hydnophora","Pocillopora","Porites"))
+spec_cols <- spec_cols[order(spec_cols$spec), ]
+
+#site_cols=data.frame(sites=unique(final_merge$Site),colz=viridis(length(unique(final_merge$Site))))
+
+transitions=c("2013-2014","2014-2015","2015-2016","2016-2017","2017-2018","2018-2019")
+trans_cols=data.frame(colz=viridis(6),trans=transitions)
+site_cols=data.frame(colz=c("#FFC20A","#DC3220","#D35FB7","#005AB5", "#40B0A6", "#4B0082"),sites=unique(final_merge$Site))
+
+site_order <- c("FR8", "FR14", "FR40", "FR39", "FR132", "FR36")
+site_colors <- c("#FFC20A", "#DC3220", "#D35FB7", "#005AB5", "#40B0A6", "#4B0082")
+
+site_cols <- data.frame(
+  colz = site_colors,
+  sites = site_order,
+  stringsAsFactors = FALSE
+)
+
+if(!is.null(dev.list())) dev.off()
+
+{
+  plot(1, 1, type = "n", axes = FALSE, xlab = "", ylab = "", main = "Site Legend")
+  
+  legend("topright", 
+         legend = c(site_cols$sites, "Island"), 
+         col = c(site_cols$colz, "black"), 
+         lwd = 5, 
+         cex = 1, 
+         bty = 'n')
+}
+
+if(!is.null(dev.list())) dev.off()
+
+{
+  plot(1, 1, type = "n", axes = FALSE, xlab = "", ylab = "", main = "Transition Legend")
+  
+  legend("topright", 
+         legend = c(trans_cols$trans, "Island"), 
+         col = c(trans_cols$colz, "black"), 
+         lwd = 5, 
+         cex = 1, 
+         bty = 'n')
+}
+
+```
+
+# Basic summaries
+
+```{r 1- Basic data summary (layer cover, pop size, number die, number born)}
+# There are false 0s in the size data (dummy entries for cells where there is no data), re-code these as NA so they dont falsely end up in the proportion data (leading to #/0=Inf or worse: 0/#=0)
+long_final_merge=melt(final_merge[,1:11],id.var=c("GenSiteClassID","Site","GenID","Class"))
+long_final_merge[which(long_final_merge$value==0),'value']<-NaN
+long_final_merge$value=as.numeric(long_final_merge$value)
+final_merge_clean=data.frame(dcast(long_final_merge,GenSiteClassID+Site+GenID+Class ~ variable, value.var="value"),final_merge[,12:17])
+table(final_merge$Site,final_merge$Class)
+huh=aggregate(value~Class+Site+variable,data=long_final_merge,FUN=length)
+huh=huh[order(huh$Class),]
+
+final_merge_clean$Site=as.factor(final_merge_clean$Site)
+final_merge_clean$Class=as.factor(final_merge_clean$Class)
+
+long_final_merge$Site=as.factor(long_final_merge$Site)
+long_final_merge$Class=as.factor(long_final_merge$Class)
+
+layer_popsize=data.frame(Class=levels(final_merge_clean$Class),array(0,c(length(unique(long_final_merge$Class)),7)))
+names(layer_popsize)=c("Class",2013:2019)
+layer_popsize
+
+for (i in 5:11){
+temp=final_merge_clean[which(final_merge_clean[,i]>0 & !is.na(final_merge_clean[, i])),]
+huh=aggregate(temp[,i],by=list(temp$Class),length)
+layer_popsize[,i-3]=huh$x
+}
+
+layer_cover_raw=data.frame(Class=levels(final_merge_clean$Class),Site=levels(final_merge_clean$Site),array(0,c(nrow(expand.grid(Class = levels(long_final_merge$Class),Site = levels(long_final_merge$Site))),7)))
+
+
+for (i in 5:11){
+temp=final_merge_clean[which(final_merge_clean[,i]>0),]
+huh=aggregate(temp[,i],by=list(temp$Class,temp$Site),sum)
+layer_cover_raw[,i-2]=huh$x/10000
+}
+names(layer_cover_raw)=c("Class","Site",2013:2019)
+
+
+layer_cover_count=data.frame(Class=levels(final_merge_clean$Class),array(0,c(4,7)))
+for (i in 3:9){
+huh=aggregate(layer_cover_raw[,i],by=list(layer_cover_raw$Class),mean)
+layer_cover_count[,i-1]=huh$x
+}
+names(layer_cover_count)=c("Class",2013:2019)
+
+layer_cover_count_se=data.frame(Class=levels(final_merge_clean$Class),array(0,c(4,7)))
+se <- function(x) sd(x) / sqrt(length(x))
+
+for (i in 3:9){
+huh=aggregate(layer_cover_raw[,i],by=list(layer_cover_raw$Class),se)
+layer_cover_count_se[,i-1]=huh$x
+}
+names(layer_cover_count_se)=c("Class",2013:2019)
+
+trans_names=names(final_merge_clean[,12:17]) ## as in Fate_2013 and so on ...
+year_names=names(final_merge_clean[,5:11]) ## as in Fate_2013 and so on ...
+
+n_sites <- length(levels(final_merge_clean$Site))
+n_specs <- length(levels(final_merge_clean$Class))
+
+alive_count=data.frame(Class=rep(levels(final_merge_clean$Class),each=n_sites),Site=rep(levels(final_merge_clean$Site),n_specs),array(0,c(nrow(expand.grid(Class = levels(final_merge_clean$Class),Site = levels(final_merge_clean$Site))),6)))
+
+grow_count=data.frame(Class=rep(levels(final_merge_clean$Class),each=n_sites),Site=rep(levels(final_merge_clean$Site),n_specs),array(0,c(nrow(expand.grid(Class = levels(final_merge_clean$Class),Site = levels(final_merge_clean$Site))),6)))
+
+shrink_count=data.frame(Class=rep(levels(final_merge_clean$Class),each=n_sites),Site=rep(levels(final_merge_clean$Site),n_specs),array(0,c(nrow(expand.grid(Class = levels(final_merge_clean$Class),Site = levels(final_merge_clean$Site))),6)))
+
+dead_count=data.frame(Class=rep(levels(final_merge_clean$Class),each=n_sites),Site=rep(levels(final_merge_clean$Site),n_specs),array(0,c(nrow(expand.grid(Class = levels(final_merge_clean$Class),Site = levels(final_merge_clean$Site))),6)))
+
+recruit_count=data.frame(Class=rep(levels(final_merge_clean$Class),each=n_sites),Site=rep(levels(final_merge_clean$Site),n_specs),array(0,c(nrow(expand.grid(Class = levels(final_merge_clean$Class),Site = levels(final_merge_clean$Site))),6)))
+
+
+
+for (j in 1:nrow(alive_count)){
+      for (i in 1:length(trans_names)) {
+temp_alive=data.frame(final_merge_clean[which(final_merge_clean[,trans_names[i]]=="alive" & final_merge_clean$Site==alive_count[j,'Site'] & final_merge_clean$Class==alive_count[j,'Class']),])
+
+temp_dead=data.frame(final_merge_clean[which(final_merge_clean[,trans_names[i]]=="died" & final_merge_clean$Site==alive_count[j,'Site'] & final_merge_clean$Class==alive_count[j,'Class']),])
+
+temp_recruit=data.frame(final_merge_clean[which(final_merge_clean[,trans_names[i]]=="recruit" & final_merge_clean$Site==alive_count[j,'Site'] & final_merge_clean$Class==alive_count[j,'Class']),])
+
+
+
+
+n_alive=nrow(temp_alive)  
+n_dead=nrow(temp_dead)
+n_recruit=nrow(temp_recruit)
+n_grow=length(which((temp_alive[,year_names[i+1]]-temp_alive[,year_names[i]])>0))
+n_shrink=length(which((temp_alive[,year_names[i+1]]-temp_alive[,year_names[i]])<0))
+
+
+alive_count[j,i+2]=n_alive
+shrink_count[j,i+2]=n_shrink
+grow_count[j,i+2]=n_grow
+dead_count[j,i+2]=n_dead
+recruit_count[j,i+2]=n_recruit
+    }
+}
+
+
+```
+
+```{r Cover plot -- write to file}
+
+graphics.off()
+
+means_mat=layer_cover_means[,2:8]
+se_mat=layer_cover_means_se[,2:8]
+hi_mat=data.frame(means_mat+se_mat)
+low_mat=data.frame(means_mat-se_mat)
+
+
+width_in <- 4
+height_in <- 3
+dpi <- 600
+width_px <- width_in * dpi
+height_px <- height_in * dpi
+
+{
+png(width=width_px, height=height_px, file=paste("Cover", ".png", sep=""), res=dpi,bg="transparent")
+  
+  par(mar=c(2.2, 2, 1, 1), tcl = -0.15, mgp = c(1, 0.25, 0), family="sans")
+
+  plot(1:7, layer_cover_means[1, 2:8], ylim=c(0, 6.5), main="Percent Cover of Each Taxon",xaxt='n', yaxt='n', pch=20, col=spec_cols$colz[1],type='o', xlab="", ylab="", lwd=1)
+  
+  arrows(x0=1:7, x1=1:7, y0=as.numeric(low_mat[1,]), y1=as.numeric(hi_mat[1,]), 
+         angle = 90, code = 3, length = 0.05, col=spec_cols$colz[1], lwd=1)
+  
+  axis(2, at=0:6, labels=0:6, las=2, cex.axis=8/12)
+  
+  par(mgp = c(1, 0, 0))
+  axis(1, at=1:7, labels=2013:2019, cex.axis=8/12)
+  
+  mtext(side=1, line=1.2, "Year", cex=10/12)
+  mtext(side=2, line=1, "Percent cover", cex=10/12)
+
+  for (i in 2:4) {
+    points(1:7, layer_cover_means[i, 2:8], pch=20, 
+           col=spec_cols$colz[i], type='o', lwd=1)
+           
+    arrows(x0=1:7, x1=1:7, y0=as.numeric(low_mat[i,]), y1=as.numeric(hi_mat[i,]), 
+           angle = 90, code = 3, length = 0.05, col=spec_cols$colz[i], lwd=1)
+  }
+  
+  legend("topleft", legend = spec_cols$spec, col = spec_cols$colz, lty = 1, cex =6/12,bty="n",lwd=7,inset=c(0.01,0.0),xpd=T, seg.len=.5, x.intersp = 0.6,pch=15,text.font=3)
+
+dev.off()
+}
+graphics.off()
+
+```
+
+```{r Recruit plot -- write to file}
+layer_recruit_means=data.frame(Class=levels(final_merge_clean$Class),array(0,c(4,6)))
+for (i in 3:8){
+huh=aggregate(recruit_count[,i],by=list(recruit_count$Class),mean)
+layer_recruit_means[,i-1]=huh$x
+}
+names(layer_recruit_means)=c("Class",c("2013-2014","2014-2015","2015-2016","2016-2017","2017-2018","2018-2019"))
+
+layer_cover_means_se=data.frame(Class=levels(final_merge_clean$Class),array(0,c(4,7)))
+se <- function(x) sd(x) / sqrt(length(x))
+
+layer_recruit_means_se=data.frame(Class=levels(final_merge_clean$Class),array(0,c(4,6)))
+for (i in 3:8){
+huh=aggregate(recruit_count[,i],by=list(recruit_count$Class),se)
+layer_recruit_means_se[,i-1]=huh$x
+}
+names(layer_recruit_means_se)=c("Class",c("2013-2014","2014-2015","2015-2016","2016-2017","2017-2018","2018-2019"))
+
+
+means_mat=layer_recruit_means[,2:7]
+se_mat=layer_recruit_means_se[,2:7]
+hi_mat=data.frame(means_mat+se_mat)
+low_mat=data.frame(means_mat-se_mat)
+
+
+width_in <- 5
+height_in <- 3
+dpi <- 600
+width_px <- width_in * dpi
+height_px <- height_in * dpi
+
+{
+png(width=width_px, height=height_px, file=paste("Recruits", ".png", sep=""), res=dpi,bg="transparent")
+
+par(mar=c(2.2, 2.2, 1, 1), tcl = -0.15, mgp = c(1, 0.25, 0))
+
+plot(1:6,layer_recruit_means[1,2:7],ylim=c(0,70),main="Mean Recruit Count by Taxon",xaxt='n',yaxt='n',pch=20,col=spec_cols$colz[1],type='o',xlab="",ylab="",lwd=12/12)
+
+arrows(x0=1:7,x1=1:7,y0=as.numeric(low_mat[1,]),y1=as.numeric(hi_mat[1,]),angle = 90, code = 3, length = 0.05,col=spec_cols$colz[1],lwd=12/12)
+#axis(2,at=c(0,0.25,0.5,0.75,1),labels=c(0,0.25,0.5,0.75,1),las=2,cex.axis=8/12)
+axis(2,las=2,cex.axis=8/12)
+par(mgp = c(1, 0, 0))
+axis(1,at=1:6,labels=c("2013-2014","2014-2015","2015-2016","2016-2017","2017-2018","2018-2019"),cex.axis=7/12)
+
+mtext(side=1,line=1.2,"Study interval",cex=10/12)
+mtext(side=2,line=1.4,"Number of recruits",cex=10/12)
+
+for (i in 2:4){
+points(1:6,layer_recruit_means[i,2:7],pch=20,col=spec_cols$colz[i],type='o',lwd=12/12)
+
+arrows(x0=1:7,x1=1:7,y0=as.numeric(low_mat[i,]),y1=as.numeric(hi_mat[i,]),angle = 90, code = 3, length = 0.05,col=spec_cols$colz[i],lwd=12/12)
+}
+
+
+legend(x=1,y=70, legend = spec_cols$spec, col = spec_cols$colz, lty = 1, cex =6/12,bty="n",lwd=7,inset=c(0.01,0.0),xpd=T, seg.len=.5, x.intersp = 0.6,pch=15)
+mtext("a", side=3, line=0, cex=10/12, adj=1, font=3)
+
+dev.off()
+}
+graphics.off()
+
+```
+
+```{r Shrinkers and growers proportions OLD}
+
+classes <- unique(long_sizes$Class)
+transitions <- unique(long_sizes$transition)
+results <- list()
+for (t in transitions) {
+  for (c in classes) {
+    
+    temp <- long_sizes[long_sizes$transition == t & long_sizes$Class == c, ]
+    
+    n_grow <- sum(temp$year2_size > temp$year1_size & temp$year1_size > 0)
+    n_shrink <- sum(temp$year2_size < temp$year1_size & temp$year1_size > 0)
+    
+    results[[length(results) + 1]] <- data.frame(
+      Class = c,
+      transition = t,
+      Growers = n_grow,
+      Shrinkers = n_shrink
+    )
+  }
+}
+
+growth_by_transition <- do.call(rbind, results)
+
+growth_by_transition
+
+prop_mat <- matrix(NA, 
+                   nrow = length(unique(long_sizes$Class)), 
+                   ncol = length(unique(long_sizes$transition)),
+                   dimnames = list(unique(long_sizes$Class), unique(long_sizes$transition)))
+
+for (t in unique(long_sizes$transition)) {
+  for (c in unique(long_sizes$Class)) {
+    temp <- long_sizes[long_sizes$transition == t & long_sizes$Class == c, ]
+valid <- temp$year1_size > 0 & temp$year2_size > 0
+    temp <- temp[valid, ]
+    change <- (temp$year2_size - temp$year1_size) / temp$year1_size
+        n_grow <- sum(change > 0.05 & temp$year2_size > temp$year1_size & temp$year1_size > 0)
+    n_shrink <- sum(change < -0.05 & temp$year2_size < temp$year1_size & temp$year1_size > 0)
+    n_stasis <- sum(change >= -0.05 & change <= 0.05 & temp$year1_size > 0 & temp$year2_size > 0, na.rm = TRUE)
+    total <- n_grow + n_shrink + n_stasis
+    prop_mat[c, t] <- ifelse(total > 0, n_grow / total, NA)
+  }
+}
+
+proportion_table <- as.data.frame(prop_mat)
+proportion_table
+
+total_mat <- matrix(NA, 
+                    nrow = length(unique(long_sizes$Class)), 
+                    ncol = length(unique(long_sizes$transition)),
+                    dimnames = list(unique(long_sizes$Class), unique(long_sizes$transition)))
+
+for (t in unique(long_sizes$transition)) {
+  for (c in unique(long_sizes$Class)) {
+    temp <- long_sizes[long_sizes$transition == t & long_sizes$Class == c, ]
+    n_grow <- sum(temp$year2_size > temp$year1_size & temp$year1_size > 0)
+    n_shrink <- sum(temp$year2_size < temp$year1_size & temp$year1_size > 0)
+     n_stasis <- sum(change >= -0.05 & change <= 0.05 & temp$year1_size > 0 & temp$year2_size > 0, na.rm = TRUE)
+    total_mat[c, t] <- n_grow + n_shrink
+  }
+}
+total_count_table <- as.data.frame(total_mat)
+
+```
+
+# Survivorship models
+
+```{r 1- Logisitic models}
+
+sitez=site_cols$sites
+trans=unique(long_sizes$transition)
+
+LR_data_raw=long_sizes
+LR_data=LR_data_raw[which(LR_data_raw$year1_size>0),]
+LR_data$fate_code<-ifelse(LR_data$year2_size==0,0,1)
+LR_data$Site <- as.factor(LR_data$Site)
+LR_data$transition <- as.factor(LR_data$transition)
+LR_data$Site=factor(LR_data$Site,levels=c("FR8","FR36","FR132","FR14","FR40","FR39"))
+
+full_model=glm(fate_code~year1_size, family=binomial, data = LR_data)
+
+trans_model_add=glm(fate_code~year1_size+transition, family=binomial, data = LR_data)
+trans_model_intrxn=glm(fate_code~year1_size*transition, family=binomial, data = LR_data)
+lrtest(trans_model_intrxn,trans_model_add)
+
+site_model_add=glm(fate_code~year1_size+Site, family=binomial, data = LR_data)
+site_model_intrxn=glm(fate_code~year1_size*Site, family=binomial, data = LR_data)
+lrtest(site_model_intrxn,site_model_add)
+
+```
+
+
+```{r Logistic model comparison}
+
+lrtest(site_model_add,full_model)
+
+LR_data_no132=LR_data[-which(LR_data$Site=="FR132"),]
+site_model_add_no132=glm(fate_code~year1_size+Site, family=binomial, data = LR_data_no132)
+full_model_no132=glm(fate_code~year1_size, family=binomial, data = LR_data_no132)
+lrtest(site_model_add_no132,full_model_no132)
+
+onetwothree_data=LR_data[which(LR_data$Site=="FR132"),]
+onetwothree_model=glm(fate_code~year1_size, family=binomial, data = onetwothree_data)
+lrtest(trans_model_add,full_model)
+
+trans_pairwise <- glht(trans_model_add, linfct = mcp(transition = "Tukey"))
+summary(trans_pairwise)
+summary(trans_pairwise, test = adjusted("Westfall"))
+
+
+site_pairwise <- glht(site_model_add, linfct = mcp(Site = "Tukey"))
+summary(site_pairwise)
+summary(site_pairwise, test = adjusted("Westfall"))
+
+```
+
+
+```{r Logistic Model summaries}
+adj_full_coef=(exp(full_model$coef[1])/(1+exp(full_model$coef[1])))
+full_se= summary(full_model)$coefficients[, "Std. Error"][1]
+adj_full_se=full_se*adj_full_coef*(1-adj_full_coef)
+
+trans_int=c(trans_model_add$coef[1])
+for (i in 3:length(trans_model_add$coef)){
+  trans_int[i-1]=trans_model_add$coef[1]+trans_model_add$coef[i]
+}
+
+trans_beta=trans_model_add$coef[2]
+adj_trans_coef=exp(trans_int+(trans_beta*0))/(1+exp(trans_int+(trans_beta*0)))
+vc <- vcov(trans_model_add)
+
+logit_SEs <- c()
+
+logit_SEs[1] <- sqrt(vc["(Intercept)", "(Intercept)"])
+
+for (i in 3:length(trans_model_add$coef)) {
+  name <- names(trans_model_add$coef)[i]
+  logit_SEs[i - 1] <- sqrt(vc["(Intercept)", "(Intercept)"] + vc[name, name] + 2*vc["(Intercept)", name])
+}
+
+prob_SEs <- logit_SEs * adj_trans_coef * (1 - adj_trans_coef)
+
+trans_LR_summary=data.frame(trans=trans,yint=adj_trans_coef,se=prob_SEs,z=summary(trans_model_add)$coefficients[, "z value"][c(1,3:(3+(length(trans)-2)))],p=summary(trans_model_add)$coefficients[, "Pr(>|z|)"][c(1,3:(3+(length(trans)-2)))])
+
+site_int=c(site_model_add$coef[1])
+for (i in 3:length(site_model_add$coef)){
+  site_int[i-1]=site_model_add$coef[1]+site_model_add$coef[i]
+}
+site_beta=site_model_add$coef[2]
+adj_site_coef=exp(site_int+(site_beta*0))/(1+exp(site_int+(site_beta*0)))
+
+vc <- vcov(site_model_add)
+
+logit_SEs <- c()
+
+logit_SEs[1] <- sqrt(vc["(Intercept)", "(Intercept)"])
+for (i in 3:length(site_model_add$coef)) {
+  name <- names(site_model_add$coef)[i]
+  logit_SEs[i - 1] <- sqrt(vc["(Intercept)", "(Intercept)"] + vc[name, name] + 2*vc["(Intercept)", name])
+}
+
+prob_SEs <- logit_SEs * adj_site_coef * (1 - adj_site_coef)
+
+sitez <- levels(LR_data$Site)
+site_LR_summary=data.frame(site=sitez,yint=adj_site_coef,se=prob_SEs,z=summary(site_model_add)$coefficients[, "z value"][c(1,3:(3+(length(sitez)-2)))],p=summary(site_model_add)$coefficients[, "Pr(>|z|)"][c(1,3:(3+(length(sitez)-2)))])
+
+AIC(full_model,trans_model_add,site_model_add)
+
+```
+
+``` {r AIC table}
+library(gridExtra)
+library(grid)
+
+model_comparison <- data.frame(
+  Model = c("Interval", "Site", "Baseline / Size"),
+  df = c(7, 7, 2),
+  AIC = c(20644, 21324, 21476)
+)
+ AIC
+model_comparison <- model_comparison[order(model_comparison$AIC), ]
+model_comparison$Delta_AIC <- model_comparison$AIC - min(model_comparison$AIC)
+
+my_theme <- ttheme_default(
+  core = list(bg_params = list(fill = c("white", "#f4f4f4"), col=NA)),
+  colhead = list(bg_params = list(fill = "#d3d3d3", col=NA))
+)
+
+plot.new()
+grid.table(model_comparison, rows = NULL, theme = my_theme)
+
+graphics.off()
+```
+
+```{r Figure 5a - Logistic model figures -  study interval - write to file}
+width_in <- 4
+height_in <- 3
+dpi <- 600
+
+width_px <- width_in * dpi
+height_px <- height_in * dpi
+
+png(width=width_px, height=height_px, file=paste("Fig_5a", ".png", sep=""), res=dpi,bg="transparent")
+
+par(mar=c(2.3, 2.2, 1, 1), 
+    tcl = -0.25, 
+    mgp = c(1.5, 0.35, 0), 
+    family="sans")
+
+offset=seq(from=0,length.out=length(trans),by=.02) 
+
+for (i in 1:length(trans)){
+  temp_row<- LR_data$transition == trans[i]
+LR_data$offset[temp_row]=ifelse(LR_data$fate_code[temp_row] ==1 ,LR_data$fate_code[temp_row]+offset[i] ,LR_data$fate_code[temp_row]-offset[i])
+}
+
+plot(x=LR_data$year1_size[which(LR_data$transition==trans[1])],y=LR_data$offset[which(LR_data$transition==trans[1])])
+plot(x = LR_data$year1_size[which(LR_data$transition == trans[1])], y = LR_data$offset[which(LR_data$transition == trans[1])], pch=16, las=1, xlab="", ylab="", yaxt='n',  main="Survivorship by Interval",col=trans_cols$colz[1],ylim=c(-0.12, 1.12),cex=.4,xlim=c(0,max(LR_data$year1_size,LR_data$year2_size)))
+
+axis(2, at=c(0, .5, 1), labels=c(0, .5, 1),cex.axis=8/10,las=1)
+par(mgp = c(1.5, 0.2, 0))
+axis(1,cex.axis=8/10,labels=F)
+mtext(side=3,line=0,"a",cex=10/12,adj=0,font=2)
+
+
+mtext(side=2,line=1.4,"Survival probability",cex=10/12)
+
+mtext(side=1,line=1.4,expression(Colony~area~(cm^2)),cex=10/12)
+
+for (i in 2:length(trans)){
+  points(x = LR_data$year1_size[which(LR_data$transition == trans[i])], 
+    y = LR_data$offset[which(LR_data$transition == trans[i])],pch=16,col=trans_cols$colz[i],cex=.4)
+}
+
+trans_beta=trans_model_add$coef[2]
+
+trans_int=c(trans_model_add$coef[1])
+for (i in 3:length(trans_model_add$coef)){
+  trans_int[i-1]=trans_model_add$coef[1]+trans_model_add$coef[i]
+}
+
+for (i in 1:length(trans_int)){
+curve((exp(trans_int[i]+(trans_beta*x))/(1+exp(trans_int[i]+(trans_beta*x)))), col=trans_cols$colz[i],lwd=1.5,add=TRUE,from=0,to=max(LR_data$year1_size,LR_data$year2_size))
+}
+
+full_model=glm(fate_code~year1_size, family=binomial, data = LR_data)
+curve(predict(full_model, data.frame(year1_size = x), type = "resp"), add = T,col="black",lty=2,lwd=1.25) 
+
+cex_label <- 0.8
+legend(x=625,y=.75,legend=trans_cols$trans,col =trans_cols$colz, lty = c(rep(1,15),3), cex =cex_label,bty="n",lwd=7,inset=c(0.02,0.05),xpd=T, seg.len=.5, x.intersp = 0.5,pch=15)
+
+dev.off()
+graphics.off()
+
+```
+
+
+```{r Figure 5b - Logistic model figures - site - write to file}
+
+width_in <- 4
+height_in <- 3
+dpi <- 600
+width_px <- width_in * dpi
+height_px <- height_in * dpi
+
+png(width=width_px, height=height_px, file=paste("Fig_5b", ".png", sep=""), res=dpi,bg="transparent")
+
+par(mar=c(2.3, 2.2, 1, 1), 
+    tcl = -0.25, 
+    mgp = c(1.5, 0.35, 0), 
+    family="sans")
+
+offset=seq(from=0,length.out=length(sitez),by=.02) 
+
+
+for (i in 1:length(sitez)){
+  temp_row<- LR_data$Site == sitez[i]
+LR_data$offset[temp_row]=ifelse(LR_data$fate_code[temp_row] ==1 ,LR_data$fate_code[temp_row]+offset[i] ,LR_data$fate_code[temp_row]-offset[i])
+}
+max_x <- max(c(LR_data$year1_size, LR_data$year2_size), na.rm=TRUE)
+plot(x = LR_data$year1_size[which(LR_data$Site == sitez[1])], y = LR_data$offset[which(LR_data$Site == sitez[1])], pch=16, las=1, xlab="", ylab="", yaxt='n', main="Survivorship by Site",col=site_cols$colz[1],ylim= c(-0.12, 1.12),cex=.4,xaxt='n')
+
+axis(2, at=c(0, .5, 1), labels=c(0, .5, 1),cex.axis=8/10,las=1)
+par(mgp = c(1.5, 0.2, 0))
+axis(1,cex.axis=8/10)
+mtext(side=3,line=0,"b",cex=10/12,adj=0,font=2)
+mtext(side=2,line=1.4,"Survival probability",cex=10/12)
+mtext(side=1,line=1.4,expression(Colony~area~(cm^2)),cex=10/12)
+
+for (i in 2:length(sitez)){
+  points(x = LR_data$year1_size[which(LR_data$Site == sitez[i])], 
+    y = LR_data$offset[which(LR_data$Site == sitez[i])],pch=16,col=site_cols$colz[i],cex=.4)
+}
+
+site_int=c(site_model_add$coef[1])
+site_beta=site_model_add$coef[2]
+
+for (i in 3:length(site_model_add$coef)){
+  site_int[i-1]=site_model_add$coef[1]+site_model_add$coef[i]
+}
+
+for (i in 1:length(site_int)){
+curve((exp(site_int[i]+(site_beta*x))/(1+exp(site_int[i]+(site_beta*x)))), col=site_cols$colz[i],lwd=1.5,add=TRUE)
+}
+
+sitez <- levels(LR_data$Site) 
+site_cols <- data.frame(
+  site = sitez,
+  colz = c("#FFC20A", "#DC3220", "#D35FB7", "#005AB5", "#40B0A6", "#4B0082") 
+)
+                 
+curve((exp(site_int[i]+(site_beta*x))/(1+exp(site_int[i]+(site_beta*x)))), col=site_cols$colz[i],lwd=1.5,add=TRUE,from=0,to=max(LR_data$year1_size,LR_data$year2_size))
+
+full_model=glm(fate_code~year1_size, family=binomial, data = LR_data)
+curve(predict(full_model, data.frame(year1_size = x), type = "resp"), add = T,col="black",lty=2,lwd=1.25) 
+cex_label = 0.8
+legend(x=625,y=.75,legend=site_cols$site,col =site_cols$colz, lty = c(rep(1,length(sitez)),3), cex =cex_label,bty="n",lwd=7,inset=c(0.02,0.05),xpd=T, seg.len=.5, x.intersp = 0.5,pch=15)
+
+dev.off()
+graphics.off()
+
+```
+
+``` {r Partial Mortality Plots}
+#dem
+long_sizes$pm_event <- ifelse((long_sizes$year2_size - long_sizes$year1_size) / long_sizes$year1_size < -0.05 & long_sizes$year2_size > 0, 1, 0)
+site_means_df <- aggregate(pm_event ~ transition + Class + Site, data = long_sizes, FUN = mean)
+
+calc_se <- function(x) {
+  sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+}
+
+pm_int_mean <- aggregate(pm_event ~ transition + Class, data = site_means_df, FUN = mean)
+pm_int_se   <- aggregate(pm_event ~ transition + Class, data = site_means_df, FUN = calc_se)
+
+long_sizes$interval <- factor(paste(long_sizes$year1, long_sizes$year2, sep="-"),
+                              levels=c("2013-2014","2014-2015","2015-2016",
+                                       "2016-2017","2017-2018","2018-2019"))
+
+long_sizes$transition <- as.numeric(long_sizes$interval)
+
+site_means_df <- aggregate(pm_event ~ transition + Class + Site, data = long_sizes, FUN = mean)
+
+pm_int_mean <- aggregate(pm_event ~ transition + Class, data = site_means_df, FUN = mean)
+pm_int_se   <- aggregate(pm_event ~ transition + Class, data = site_means_df, FUN = calc_se)
+
+pm_int_taxa <- merge(pm_int_mean, pm_int_se, by = c("transition", "Class"), suffixes = c("_mean", "_se"))
+
+int_poc <- pm_int_taxa[pm_int_taxa$Class == "Pocillopora", ]
+int_por <- pm_int_taxa[pm_int_taxa$Class == "Porites_massive", ]
+int_hyd <- pm_int_taxa[pm_int_taxa$Class == "Hydnophora_microconos", ]
+int_ast <- pm_int_taxa[pm_int_taxa$Class == "Astrea_curta", ]
+
+plot(x = 1:6, y = rep(0.5, 6), type = "n", 
+     ylim = c(0, 1), 
+     xaxt = "n", 
+     xlab = "Time Interval", 
+     ylab = "Proportion of Population Shrank", 
+     main = "Proportion of Partial Mortality Over Transition Intervals")
+
+axis(1, at = 1:6, labels = levels(long_sizes$interval), cex.axis = 0.8)
+
+plot_time_series <- function(data, color) {
+  x_pos <- data$transition
+  y_pos <- data$pm_event_mean
+  se <- data$pm_event_se
+  arrows(x0 = x_pos, y0 = y_pos - se, 
+         x1 = x_pos, y1 = y_pos + se, 
+         angle = 90, code = 3, length = 0.05, col = color, lwd = 1.5)
+  lines(x = x_pos, y = y_pos, col = color, lwd = 2.5)
+  points(x = x_pos, y = y_pos, col = color, pch = 16, cex = 1.5)
+}
+
+plot_time_series(int_ast, spec_cols$colz[1])
+plot_time_series(int_hyd, spec_cols$colz[2])
+plot_time_series(int_poc, spec_cols$colz[3])
+plot_time_series(int_por, spec_cols$colz[4])
+
+legend("topright", 
+       legend = spec_cols$spec, 
+       col = spec_cols$colz, 
+       lwd = 2.5, 
+       pch = 16, 
+       bty = "n", text.font = 3)
+
+#should be 6
+n_check <- aggregate(pm_event ~ transition + Class, 
+                     data = site_means_df, 
+                     FUN = function(x) length(na.omit(x)))
+
+print(n_check)
+
+graphics.off()
+
+#part mort site
+calc_se <- function(x) {
+  sd(x, na.rm = TRUE) / sqrt(length(na.omit(x)))
+}
+
+trans_means_df <- aggregate(pm_event ~ Site + Class + interval, data = long_sizes, FUN = mean)
+
+pm_mean <- aggregate(pm_event ~ Site + Class, data = trans_means_df, FUN = mean)
+pm_se   <- aggregate(pm_event ~ Site + Class, data = trans_means_df, FUN = calc_se)
+
+pm_site_taxa <- merge(pm_mean, pm_se, by = c("Site", "Class"), suffixes = c("_mean", "_se"))
+
+pm_site_taxa$Site <- factor(pm_site_taxa$Site, levels = c("FR8", "FR14", "FR40", "FR39", "FR132", "FR36"))
+pm_site_taxa$Site_Num <- as.numeric(pm_site_taxa$Site)
+
+site_poc <- pm_site_taxa[pm_site_taxa$Class == "Pocillopora", ]
+site_por <- pm_site_taxa[pm_site_taxa$Class == "Porites_massive", ]
+site_hyd <- pm_site_taxa[pm_site_taxa$Class == "Hydnophora_microconos", ]
+site_ast <- pm_site_taxa[pm_site_taxa$Class == "Astrea_curta", ]
+
+site_poc <- site_poc[order(site_poc$Site_Num), ]
+site_por <- site_por[order(site_por$Site_Num), ]
+site_hyd <- site_hyd[order(site_hyd$Site_Num), ]
+site_ast <- site_ast[order(site_ast$Site_Num), ]
+
+off_ast <- -0.15; off_hyd <- -0.05; off_poc <- 0.05; off_por <- 0.15
+
+plot(x = 1:6, y = rep(0.5, 6), type = "n", ylim = c(0, 1), xlim = c(0.5, 6.5), 
+     xaxt = "n", xlab = "Site", ylab = "Proportion of Population Shrank", 
+     main = "Proportion of Partial Mortality by Site")
+
+axis(1, at = 1:6, labels = levels(pm_site_taxa$Site))
+
+plot_taxa_points <- function(data, offset, color) {
+  x_pos <- data$Site_Num + offset
+  y_pos <- data$pm_event_mean
+  se <- data$pm_event_se
+  
+  arrows(x0 = x_pos, y0 = y_pos - se, x1 = x_pos, y1 = y_pos + se, 
+         angle = 90, code = 3, length = 0.05, col = color, lwd = 1.5)
+  
+  points(x = x_pos, y = y_pos, col = color, pch = 16, cex = 1.2)
+}
+
+plot_taxa_points(site_ast, off_ast, spec_cols$colz[1])
+plot_taxa_points(site_hyd, off_hyd, spec_cols$colz[2])
+plot_taxa_points(site_poc, off_poc, spec_cols$colz[3])
+plot_taxa_points(site_por, off_por, spec_cols$colz[4])
+
+legend("topright", legend = spec_cols$spec, col = spec_cols$colz, pch = 16, bty = "n", text.font = 3)
+
+#should have 6
+table(trans_means_df$Site, trans_means_df$Class)
+
+graphics.off()
+
+#part mort txs
+st_mean <- aggregate(pm_event ~ Site + Class + transition, data = long_sizes, FUN = mean)
+st_se   <- aggregate(pm_event ~ Site + Class + transition, data = long_sizes, FUN = calc_se)
+st_taxa <- merge(st_mean, st_se, by = c("Site", "Class", "transition"), suffixes = c("_mean", "_se"))
+
+site_order <- c("FR8", "FR36", "FR132", "FR14", "FR40", "FR39")
+st_taxa$Site <- factor(st_taxa$Site, levels = site_order)
+
+site_order <- c("FR8", "FR36", "FR132", "FR14", "FR40", "FR39")
+st_taxa$Site <- factor(st_taxa$Site, levels = site_order)
+
+st_taxa <- st_taxa[order(st_taxa$Site, st_taxa$transition), ]
+
+st_taxa$interval_str <- levels(long_sizes$interval)[st_taxa$transition]
+st_taxa$label_str <- paste(st_taxa$Site, st_taxa$interval_str, sep = " ")
+
+ordered_labels <- unique(st_taxa$label_str)
+ordered_sites <- st_taxa$Site[match(ordered_labels, st_taxa$label_str)]
+
+x_pos_vector <- numeric(length(ordered_labels))
+current_x <- 1
+
+for(i in 1:length(ordered_labels)) {
+  if (i > 1 && ordered_sites[i] != ordered_sites[i-1]) {
+    current_x <- current_x + 2  
+  }
+  x_pos_vector[i] <- current_x
+  current_x <- current_x + 1
+}
+
+st_taxa$x_pos <- x_pos_vector[match(st_taxa$label_str, ordered_labels)]
+
+st_ast <- st_taxa[st_taxa$Class == "Astrea_curta", ]
+st_hyd <- st_taxa[st_taxa$Class == "Hydnophora_microconos", ]
+st_poc <- st_taxa[st_taxa$Class == "Pocillopora", ]
+st_por <- st_taxa[st_taxa$Class == "Porites_massive", ]
+
+plot_interaction <- function(data, color) {
+  arrows(x0 = data$x_pos, y0 = data$pm_event_mean - data$pm_event_se, 
+         x1 = data$x_pos, y1 = data$pm_event_mean + data$pm_event_se, 
+         angle = 90, code = 3, length = 0.05, col = color, lwd = 1.5)
+  points(x = data$x_pos, y = data$pm_event_mean, col = color, pch = 16, cex = 1.5)
+  sites <- unique(data$Site)
+  for(s in sites) {
+    sub_data <- data[data$Site == s, ]
+    if(nrow(sub_data) > 1) {
+      lines(x = sub_data$x_pos, y = sub_data$pm_event_mean, col = color, lwd = 2.5)
+    }
+  }
+}
+
+par(mar = c(10, 5, 4, 2) + 0.1) 
+
+plot(x = x_pos_vector, y = rep(0.5, length(x_pos_vector)), type = "n", 
+     xlim = c(min(x_pos_vector), max(x_pos_vector)), 
+     ylim = c(0, 1), 
+     xaxt = "n", 
+     xlab = "", 
+     ylab = "Proportion of Population Shrank", 
+     main = "Partial Mortality: Site x Time Interaction",
+     cex.lab = 1.3,       
+     cex.axis = 1.1,      
+     cex.main = 1.5)      
+
+axis(1, at = x_pos_vector, labels = FALSE)
+text(x = x_pos_vector, 
+     y = par("usr")[3] - 0.03,  
+     labels = ordered_labels, 
+     srt = 45,                  
+     adj = 1,                   
+     xpd = TRUE,                
+     cex = 0.95)   
+
+mtext("Site and Interval", side = 1, line = 7, cex = 1.3)
+
+plot_interaction(st_ast, spec_cols$colz[1])
+plot_interaction(st_hyd, spec_cols$colz[2])
+plot_interaction(st_poc, spec_cols$colz[3])
+plot_interaction(st_por, spec_cols$colz[4])
+
+legend("topright", legend = spec_cols$spec, col = spec_cols$colz, 
+       lwd = 2.5, pch = 16, bty = "n", cex = 1.2, text.font=3)
+
+graphics.off()
+```
+
+```{r Figure 5c - Logistic model figures - taxa - write to file}
+LR_data$Class <- as.factor(LR_data$Class)
+taxaz <- levels(LR_data$Class)
+taxa_cols <- data.frame(
+  taxa = taxaz,
+  colz = spec_cols$colz[1:length(taxaz)] 
+)
+taxa_model_add <- glm(fate_code ~ year1_size * Class, family = binomial, data = LR_data)
+full_model     <- glm(fate_code ~ year1_size, family = binomial, data = LR_data)
+
+width_in   <- 4
+height_in  <- 3
+dpi        <- 600
+width_px   <- width_in * dpi
+height_px  <- height_in * dpi
+
+png(width = width_px, height = height_px, file = "Fig_5c_Taxa_Overall_Int.png", res = dpi, bg = "transparent")
+par(mar = c(3, 3, 1.5, 1), tcl = -0.25, mgp = c(1.8, 0.4, 0), family = "sans")
+offset <- seq(from = 0, length.out = length(taxaz), by = 0.02) 
+LR_data$offset <- NA 
+
+for (i in 1:length(taxaz)){
+  temp_row <- LR_data$Class == taxaz[i]
+  LR_data$offset[temp_row] <- ifelse(LR_data$fate_code[temp_row] == 1,
+                                     LR_data$fate_code[temp_row] + offset[i],
+                                     LR_data$fate_code[temp_row] - offset[i])
+}
+
+max_x <- max(LR_data$year1_size, na.rm = TRUE)
+plot(1, type = "n", las = 1, xlab = "", ylab = "", yaxt = 'n', xaxt = 'n',
+     main = "Survivorship by Taxa", xlim = c(0, max_x), ylim = c(-0.12, 1.12))
+axis(1, cex.axis = 0.8)
+axis(2, at = c(0, 0.5, 1), labels = c(0, 0.5, 1), cex.axis = 0.8, las = 1)
+mtext(side = 1, line = 1.6, expression(Colony~area~(cm^2)), cex = 0.9)
+mtext(side = 2, line = 1.8, "Survival probability", cex = 0.9)
+for (i in 1:length(taxaz)){
+  points(x = LR_data$year1_size[which(LR_data$Class == taxaz[i])], 
+         y = LR_data$offset[which(LR_data$Class == taxaz[i])], 
+         pch = 16, col = taxa_cols$colz[i], cex = 0.4)
+}
+for (i in 1:length(taxaz)){
+  curve(predict(taxa_model_add, newdata = data.frame(year1_size = x, Class = taxaz[i]), type = "response"), 
+        col = taxa_cols$colz[i], lwd = 1.5, add = TRUE, from = 0, to = max_x)
+}
+
+curve(predict(full_model, data.frame(year1_size = x), type = "response"), add = TRUE, col = "black", lty = 2, lwd = 1.25) 
+
+legend("right", 
+       legend = as.expression(lapply(taxa_cols$taxa, function(x) bquote(italic(.(x))))), 
+       col = taxa_cols$colz, lty = 1, cex = 0.7, bty = "n", lwd = 2, pch = 15)
+
+dev.off()
+graphics.off()
+
+```
+
+```{r Taxa Specific - Transition survivorship}
+for (t_name in taxaz) {
+  sub_data <- LR_data[LR_data$Class == t_name, ]
+  sub_data$transition <- droplevels(as.factor(sub_data$transition))
+  
+  transition_lookup <- c("t1" = "2013-2014", 
+                         "t2" = "2014-2015", 
+                         "t3" = "2015-2016", 
+                         "t4" = "2016-2017", 
+                         "t5" = "2017-2018", 
+                         "t6" = "2018-2019")
+  
+  levels(sub_data$transition) <- transition_lookup[levels(sub_data$transition)]
+  
+  trans_sub <- levels(sub_data$transition)
+  
+  if(length(trans_sub) < 2) next 
+  
+  trans_model_sub <- glm(fate_code ~ year1_size + transition, family=binomial, data = sub_data)
+  
+  safe_name <- gsub("[^A-Za-z0-9_.-]", "_", t_name)
+  png(width=width_px, height=height_px, file=paste0("Fig_Taxa_", safe_name, "_Transitions.png"), res=dpi, bg="transparent")
+  
+  par(mar=c(2.3, 2.2, 1, 1), tcl = -0.25, mgp = c(1.5, 0.35, 0), family="sans")
+  
+  sub_data$offset <- NA 
+  offset_vals = seq(from=0, length.out=length(trans_sub), by=.02) 
+  
+  for (i in 1:length(trans_sub)){
+    temp_row <- sub_data$transition == trans_sub[i]
+    sub_data$offset[temp_row] <- ifelse(sub_data$fate_code[temp_row] == 1,
+                                        sub_data$fate_code[temp_row] + offset_vals[i],
+                                        sub_data$fate_code[temp_row] - offset_vals[i])
+  }
+  
+  get_col <- function(t_val) {
+    matched_col <- trans_cols$colz[match(as.character(t_val), as.character(trans_cols$trans))]
+    if (is.na(matched_col)) return("black") else return(matched_col)
+  }
+  
+  max_size <- max(c(sub_data$year1_size, sub_data$year2_size), na.rm=TRUE)
+  
+  plot(1, type="n", las=1, xlab="", ylab="", yaxt='n', xaxt='n',
+       main = bquote("Survivorship by Transition for" ~ italic(.(t_name))), 
+       ylim=c(-0.12, 1.12), xlim=c(0, max_size), cex=.4)
+  
+  axis(2, at=c(0, .5, 1), labels=c(0, .5, 1), cex.axis=8/10, las=1)
+  par(mgp = c(1.5, 0.2, 0))
+  axis(1, cex.axis=8/10)
+  mtext(side=2, line=1.4, "Survival probability", cex=10/12)
+  mtext(side=1, line=1.4, bquote("Colony area ("*cm^2*")"), cex=10/12)
+  
+  for (i in 1:length(trans_sub)){
+    points(x = sub_data$year1_size[which(sub_data$transition == trans_sub[i])], 
+           y = sub_data$offset[which(sub_data$transition == trans_sub[i])], 
+           pch=16, col=get_col(trans_sub[i]), cex=.4)
+  }
+  
+  for (i in 1:length(trans_sub)){
+    curve(predict(trans_model_sub, newdata=data.frame(year1_size=x, transition=trans_sub[i]), type="response"),
+          col=get_col(trans_sub[i]), lwd=1.5, add=TRUE, from=0, to=max_size)
+  }
+  
+  legend("bottomright", legend=trans_sub, col=sapply(trans_sub, get_col),
+         lty=1, cex=0.8, bty="n", lwd=3, pch=15)
+  
+  dev.off()
+}
+
+```
+
+```{r Taxa Specific - Site survivorship}
+for (t_name in taxaz) {
+  
+  sub_data <- LR_data[LR_data$Class == t_name, ]
+  
+  sub_data$Site <- droplevels(as.factor(sub_data$Site))
+  site_sub <- levels(sub_data$Site)
+  
+  if(length(site_sub) < 2) next 
+  
+  site_model_sub <- glm(fate_code ~ year1_size + Site, family=binomial, data = sub_data)
+  
+  safe_name <- gsub("[^A-Za-z0-9_.-]", "_", t_name)
+  png(width=width_px, height=height_px, file=paste0("Fig_Taxa_", safe_name, "_Sites.png"), res=dpi, bg="transparent")
+  
+  par(mar=c(2.3, 2.2, 1, 1), tcl = -0.25, mgp = c(1.5, 0.35, 0), family="sans")
+  
+  sub_data$offset <- NA 
+  offset_vals = seq(from=0, length.out=length(site_sub), by=.02) 
+  
+  for (i in 1:length(site_sub)){
+    temp_row <- sub_data$Site == site_sub[i]
+    sub_data$offset[temp_row] <- ifelse(sub_data$fate_code[temp_row] == 1,
+                                        sub_data$fate_code[temp_row] + offset_vals[i],
+                                        sub_data$fate_code[temp_row] - offset_vals[i])
+  }
+  
+  get_col <- function(s_val) {
+    matched_col <- site_cols$colz[match(as.character(s_val), as.character(site_cols$site))]
+    if (is.na(matched_col)) return("black") else return(matched_col)
+  }
+  
+  plot_title <- bquote("Survivorship by Transition for"  ~ italic(.(t_name)))
+  max_size <- max(c(sub_data$year1_size, sub_data$year2_size), na.rm=TRUE)
+  
+  plot(1, type="n", las=1, xlab="", ylab="", yaxt='n', xaxt='n',
+       main = plot_title, 
+       ylim=c(-0.12, 1.12), xlim=c(0, max_size), cex=.4)
+  
+  axis(2, at=c(0, .5, 1), labels=c(0, .5, 1), cex.axis=8/10, las=1)
+  par(mgp = c(1.5, 0.2, 0))
+  axis(1, cex.axis=8/10)
+  mtext(side=2, line=1.4, "Survival probability", cex=10/12)
+  mtext(side=1, line=1.4, expression(Colony~area~(cm^2)), cex=10/12)
+  
+  for (i in 1:length(site_sub)){
+    points(x = sub_data$year1_size[which(sub_data$Site == site_sub[i])], 
+           y = sub_data$offset[which(sub_data$Site == site_sub[i])], 
+           pch=16, col=get_col(site_sub[i]), cex=.4)
+  }
+  
+  for (i in 1:length(site_sub)){
+    curve(predict(site_model_sub, newdata=data.frame(year1_size=x, Site=site_sub[i]), type="response"),
+          col=get_col(site_sub[i]), lwd=1.5, add=TRUE, from=0, to=max_size)
+  }
+  
+  legend("bottomright", legend=site_sub, col=sapply(site_sub, get_col), 
+         lty=1, cex=0.8, bty="n", lwd=3, pch=15)
+  
+  dev.off()
+}
+```
+
+``` {r Logistic Regression stats - site and time and independent}
+taxa_model_add <- glm(fate_code ~ year1_size + Site, family=binomial, data = LR_data)
+print(summary(taxa_model_add))
+cat("\n--- Analysis of Deviance (Likelihood Ratio Test) ---\n")
+print(anova(taxa_model_add, test="Chisq"))
+
+#taxa
+taxa_model_add <- glm(fate_code ~ year1_size + Class, family=binomial, data = LR_data)
+
+print(summary(taxa_model_add))
+```
+
+```{r LR models for each taxon}
+LR_data_raw = long_sizes
+LR_data = LR_data_raw[which(LR_data_raw$year1_size > 0), ]
+LR_data$fate_code <- ifelse(LR_data$year2_size == 0, 0, 1)
+LR_data$transition <- as.factor(LR_data$transition)
+LR_data$Class <- as.factor(LR_data$Class)
+LR_split = split(LR_data, LR_data$Class)
+
+full_model_ast = glm(fate_code ~ year1_size, family = binomial, data = LR_split[[1]])
+trans_model_ast = glm(fate_code ~ year1_size + transition, family = binomial, data = LR_split[[1]])
+site_model_ast = glm(fate_code ~ year1_size + Site, family = binomial, data = LR_split[[1]])
+
+lrtest(trans_model_ast, full_model_ast)
+lrtest(site_model_ast, full_model_ast)
+
+mean(predict(full_model_ast, newdata = LR_split[[1]], type = "response"))
+
+preds <- predict(trans_model_ast, type = "response")
+LR_split[[1]]$predicted <- preds
+tapply(LR_split[[1]]$predicted, LR_split[[1]]$transition, mean)
+
+preds <- predict(site_model_ast, type = "response")
+LR_split[[1]]$predicted <- preds
+tapply(LR_split[[1]]$predicted, LR_split[[1]]$Site, mean)
+
+full_model_hyd = glm(fate_code ~ year1_size, family = binomial, data = LR_split[[2]])
+trans_model_hyd = glm(fate_code ~ year1_size + transition, family = binomial, data = LR_split[[2]])
+site_model_hyd = glm(fate_code ~ year1_size + Site, family = binomial, data = LR_split[[2]])
+
+lrtest(trans_model_hyd, full_model_hyd)
+lrtest(site_model_hyd, full_model_hyd)
+mean(predict(full_model_hyd, newdata = LR_split[[2]], type = "response"))
+
+preds <- predict(trans_model_hyd, type = "response")
+LR_split[[2]]$predicted <- preds
+tapply(LR_split[[2]]$predicted, LR_split[[2]]$transition, mean)
+
+preds <- predict(site_model_hyd, type = "response")
+LR_split[[2]]$predicted <- preds
+tapply(LR_split[[2]]$predicted, LR_split[[2]]$Site, mean)
+
+
+full_model_poc = glm(fate_code ~ year1_size, family = binomial, data = LR_split[[3]])
+trans_model_poc = glm(fate_code ~ year1_size + transition, family = binomial, data = LR_split[[3]])
+site_model_poc = glm(fate_code ~ year1_size + Site, family = binomial, data = LR_split[[3]])
+
+lrtest(trans_model_poc, full_model_poc)
+lrtest(site_model_poc, full_model_poc)
+
+mean(predict(full_model_poc, newdata = LR_split[[3]], type = "response"))
+
+preds <- predict(trans_model_poc, type = "response")
+LR_split[[3]]$predicted <- preds
+tapply(LR_split[[3]]$predicted, LR_split[[3]]$transition, mean)
+
+preds <- predict(site_model_poc, type = "response")
+LR_split[[3]]$predicted <- preds
+tapply(LR_split[[3]]$predicted, LR_split[[3]]$Site, mean)
+
+full_model_por = glm(fate_code ~ year1_size, family = binomial, data = LR_split[[4]])
+trans_model_por = glm(fate_code ~ year1_size + transition, family = binomial, data = LR_split[[4]])
+site_model_por = glm(fate_code ~ year1_size + Site, family = binomial, data = LR_split[[4]])
+
+lrtest(trans_model_por, full_model_por)
+lrtest(site_model_por, full_model_por)
+
+mean(predict(full_model_por, newdata = LR_split[[4]], type = "response"))
+
+preds <- predict(trans_model_por, type = "response")
+LR_split[[4]]$predicted <- preds
+tapply(LR_split[[4]]$predicted, LR_split[[4]]$transition, mean)
+
+preds <- predict(site_model_por, type = "response")
+LR_split[[4]]$predicted <- preds
+tapply(LR_split[[4]]$predicted, LR_split[[4]]$Site, mean)
+```
+
+``` {r Tables with adjusted est}
+#changing est
+library(gt)
+final_merge$Class=as.factor(final_merge$Class)
+
+classes=levels(final_merge_clean$Class)
+
+spec_logis_full <- list(full_model_ast, full_model_hyd, full_model_poc, full_model_por)
+spec_logis_interval <- list(trans_model_ast, trans_model_hyd, trans_model_poc, trans_model_por)
+
+trans <- c("t1", "t2", "t3", "t4", "t5", "t6")
+all_results <- list()
+
+for (i in seq_along(spec_logis_interval)) {
+  
+  full_model <- spec_logis_full[[i]]
+  trans_model_add <- spec_logis_interval[[i]]
+  this_class <- classes[i]
+
+  adj_full_coef <- exp(full_model$coef[1]) / (1 + exp(full_model$coef[1]))
+  full_se <- summary(full_model)$coefficients[1, "Std. Error"]
+  adj_full_se <- full_se * adj_full_coef * (1 - adj_full_coef)
+
+  trans_int <- c(trans_model_add$coef[1])
+  for (j in 3:length(trans_model_add$coef)) {
+    trans_int[j - 1] <- trans_model_add$coef[1] + trans_model_add$coef[j]
+  }
+  trans_beta <- trans_model_add$coef[2]
+  adj_trans_coef <- exp(trans_int + (trans_beta * 0)) / (1 + exp(trans_int + (trans_beta * 0)))
+
+  vc <- vcov(trans_model_add)
+  logit_SEs <- c()
+  logit_SEs[1] <- sqrt(vc["(Intercept)", "(Intercept)"])
+  for (j in 3:length(trans_model_add$coef)) {
+    name <- names(trans_model_add$coef)[j]
+    logit_SEs[j - 1] <- sqrt(vc["(Intercept)", "(Intercept)"] + vc[name, name] + 2 * vc["(Intercept)", name])
+  }
+  prob_SEs <- logit_SEs * adj_trans_coef * (1 - adj_trans_coef)
+
+  z_vals <- summary(trans_model_add)$coefficients[c(1, 3:(3 + length(trans) - 2)), "z value"]
+  p_vals <- summary(trans_model_add)$coefficients[c(1, 3:(3 + length(trans) - 2)), "Pr(>|z|)"]
+
+  full_slope <- coef(full_model)["year1_size"]
+  trans_slope <- coef(trans_model_add)["year1_size"]
+
+  trans_rows <- data.frame(
+    Class = this_class,
+    Model = "transition",
+    Transition = trans,
+    yint = adj_trans_coef,
+    se = prob_SEs,
+    z = z_vals,
+    p = p_vals,
+    AIC = AIC(trans_model_add),
+    slope = rep(trans_slope, length(trans))
+  )
+
+  full_row <- data.frame(
+    Class = this_class,
+    Model = "full",
+    Transition = "pooled",
+    yint = adj_full_coef,
+    se = adj_full_se,
+    z = summary(full_model)$coefficients[1, "z value"],
+    p = summary(full_model)$coefficients[1, "Pr(>|z|)"],
+    AIC = AIC(full_model),
+    slope = full_slope
+  )
+
+  all_results[[i]] <- rbind(full_row, trans_rows)
+}
+
+trans_LR_summary_all <- do.call(rbind, all_results)
+
+
+#^sites
+spec_logis_site <- list(site_model_ast, site_model_hyd, site_model_poc, site_model_por)
+
+all_site_results <- list()
+
+for (i in seq_along(spec_logis_site)) {
+  
+  site_model_add <- spec_logis_site[[i]]
+  this_class <- classes[i]
+
+  actual_sites <- unique(as.character(site_model_add$model$Site))
+  n_sites <- length(actual_sites)
+  
+  if (n_sites < 2) next
+
+  site_int <- c(site_model_add$coef[1])
+  for (j in 3:(2 + n_sites - 1)) {
+    site_int[j - 1] <- site_model_add$coef[1] + site_model_add$coef[j]
+  }
+  site_beta <- site_model_add$coef[2]
+  adj_site_coef <- exp(site_int + (site_beta * 0)) / (1 + exp(site_int + (site_beta * 0)))
+
+  vc <- vcov(site_model_add)
+  logit_SEs <- c()
+  logit_SEs[1] <- sqrt(vc["(Intercept)", "(Intercept)"])
+  for (j in 3:(2 + n_sites - 1)) {
+    name <- names(site_model_add$coef)[j]
+    logit_SEs[j - 1] <- sqrt(vc["(Intercept)", "(Intercept)"] + vc[name, name] + 2 * vc["(Intercept)", name])
+  }
+  prob_SEs <- logit_SEs * adj_site_coef * (1 - adj_site_coef)
+
+  indices_to_pull <- c(1, 3:(2 + n_sites - 1))
+  z_vals <- summary(site_model_add)$coefficients[indices_to_pull, "z value"]
+  p_vals <- summary(site_model_add)$coefficients[indices_to_pull, "Pr(>|z|)"]
+
+  site_slope <- coef(site_model_add)["year1_size"]
+
+  site_rows <- data.frame(
+    Class = this_class,
+    Model = "site",
+    Site = actual_sites,        
+    yint = adj_site_coef,
+    se = prob_SEs,
+    z = z_vals,
+    p = p_vals,
+    AIC = AIC(site_model_add),
+    slope = rep(site_slope, n_sites)
+  )
+  all_site_results[[i]] <- site_rows
+}
+
+#final combined table with trans
+site_LR_summary_all <- do.call(rbind, all_site_results)
+
+transition_wide <- trans_LR_summary_all %>%
+  filter(Model == "transition") %>%
+  mutate(
+    Transition = case_when(
+      Transition == "t1" ~ "2013-2014",
+      Transition == "t2" ~ "2014-2015",
+      Transition == "t3" ~ "2015-2016",
+      Transition == "t4" ~ "2016-2017",
+      Transition == "t5" ~ "2017-2018",
+      Transition == "t6" ~ "2018-2019",
+      TRUE ~ Transition
+    ),
+    Class_Short = case_when(grepl("Ast", Class) ~ "Ast", grepl("Hyd", Class) ~ "Hyd", grepl("Poc", Class) ~ "Poc", grepl("Por", Class) ~ "Por", TRUE ~ as.character(Class))
+  ) %>%
+  dplyr::select(Class_Short, Transition, Prob = yint) %>%
+  group_by(Class_Short) %>% arrange(desc(Prob), .by_group = TRUE) %>% mutate(Rank = row_number()) %>% ungroup() %>%
+  pivot_wider(id_cols = Transition, names_from = Class_Short, values_from = c(Rank, Prob), names_glue = "{Class_Short}_{.value}") %>%
+  rename(Interval = Transition) %>%
+  arrange(Interval)
+
+trans_gt <- transition_wide %>%
+  dplyr::select(
+    Interval,
+    any_of(c("Ast_Rank", "Ast_Prob", 
+             "Hyd_Rank", "Hyd_Prob", 
+             "Poc_Rank", "Poc_Prob", 
+             "Por_Rank", "Por_Prob"))
+  ) %>%
+  gt() %>%
+  tab_header(
+    title = md("**Comparative Temporal Trends: Coral Survival Probabilities**"), 
+    subtitle = "Survival Ranking and Probabilities across Survey Intervals"
+  ) %>%
+  tab_spanner(label = md("*Astrea*"), columns = starts_with("Ast")) %>%
+  tab_spanner(label = md("*Hydnophora*"), columns = starts_with("Hyd")) %>%
+  tab_spanner(label = md("*Pocillopora*"), columns = starts_with("Poc")) %>%
+  tab_spanner(label = md("*Porites*"), columns = starts_with("Por")) %>%
+  cols_label(
+    ends_with("_Prob") ~ "Probability", 
+    ends_with("_Rank") ~ "Rank"
+  ) %>%
+  fmt_percent(columns = ends_with("_Prob"), decimals = 1) %>%
+  fmt_integer(columns = ends_with("_Rank")) %>%
+  sub_missing(columns = everything(), missing_text = "-") %>%
+  data_color(
+    columns = ends_with("_Prob"), 
+    fn = scales::col_numeric(
+      palette = c("white", "#1a9850"), 
+      domain = c(0, 1), 
+      na.color = "transparent"
+    )
+  ) %>%
+  tab_source_note(
+    source_note = md("**Legend:** Colors indicate survival (White=Low, Green=High). Rank 1 is the highest survival interval for that taxon. *Probabilities estimated at mean colony size.*")
+  )
+
+trans_gt
+  
+#site table
+site_clean <- site_LR_summary_all %>%
+  filter(Model == "site") %>%
+  mutate(
+    Class_Short = case_when(
+      grepl("Astrea", Class, ignore.case = TRUE) ~ "Ast",
+      grepl("Hydnophora", Class, ignore.case = TRUE) ~ "Hyd",
+      grepl("Pocillopora", Class, ignore.case = TRUE) ~ "Poc",
+      grepl("Porites", Class, ignore.case = TRUE) ~ "Por",
+      TRUE ~ as.character(Class)
+    )
+  )
+
+site_wide <- site_clean %>%
+  dplyr::select(Class_Short, Site, Prob = yint) %>%
+  group_by(Class_Short) %>%
+  arrange(desc(Prob), .by_group = TRUE) %>%
+  mutate(Rank = row_number()) %>%
+  ungroup() %>%
+  mutate(Site = factor(Site, levels = c("FR8", "FR36", "FR132", "FR14", "FR40", "FR39"))) %>%
+  arrange(Site) %>%
+  pivot_wider(
+    id_cols = Site, 
+    names_from = Class_Short,
+    values_from = c(Rank, Prob),
+    names_glue = "{Class_Short}_{.value}"
+  ) %>%
+  dplyr::select(Site, sort(names(.))) %>%
+  dplyr::select(Site, any_of(c(
+    "Ast_Rank", "Ast_Prob", 
+    "Hyd_Rank", "Hyd_Prob", 
+    "Poc_Rank", "Poc_Prob", 
+    "Por_Rank", "Por_Prob"
+  )))
+
+site_gt <- site_wide %>%
+  gt() %>%
+  tab_header(
+    title = md("**Comparative Spatial Trends: Coral Survival Probabilities**"), 
+    subtitle = "Sites ordered by geographic location; Ranking within taxon" 
+  ) %>%
+  tab_spanner(label = md("*Astrea*"), columns = starts_with("Ast")) %>%
+  tab_spanner(label = md("*Hydnophora*"), columns = starts_with("Hyd")) %>%
+  tab_spanner(label = md("*Pocillopora*"), columns = starts_with("Poc")) %>%
+  tab_spanner(label = md("*Porites*"), columns = starts_with("Por")) %>%
+  cols_label(
+    ends_with("_Prob") ~ "Probability", 
+    ends_with("_Rank") ~ "Rank"
+  ) %>%
+  fmt_percent(columns = ends_with("_Prob"), decimals = 1) %>%
+  fmt_integer(columns = ends_with("_Rank")) %>% # Ensure ranks don't show .0
+  sub_missing(columns = everything(), missing_text = "-") %>%
+  data_color(
+    columns = ends_with("_Prob"), 
+    fn = scales::col_numeric(
+      palette = c("white", "#1a9850"), 
+      domain = c(0, 1), 
+      na.color = "transparent"
+    )
+  ) %>%
+  tab_source_note(
+    source_note = md("**Legend:** Colors indicate survival (White=Low, Green=High). Rank 1 is the highest survival site for that taxon. *Probabilities estimated at mean colony size.*")
+  )
+
+site_gt
+```
