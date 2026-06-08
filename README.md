@@ -1,1 +1,0 @@
-# spatial-temporal-trends-pal
